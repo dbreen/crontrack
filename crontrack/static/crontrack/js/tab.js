@@ -3,7 +3,7 @@
 // Change which tab of content is currently being displayed
 function changeTab(ev, tabName, setCookie=true) {
     // Check if this is on page load (needs to be faster and not set a cookie)
-    if (event === undefined) {
+    if (ev === undefined) {
         // An event hasn't been triggered; find the button before activating it
         var button = $('div.tab button[js-target="' + tabName + '"]');
     } else {
