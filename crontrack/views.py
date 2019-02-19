@@ -27,12 +27,15 @@ def index(request):
     return render(request, 'crontrack/index.html')
 
 def notify_job(request, id):
+    # Update last_notified, last_failed, and next_run
     job = Job.objects.get(pk=id)
     job.last_notified = timezone.now()
     job.last_failed = None
+    now = timezone.localtime(timezone.now(), job.user.timezone)
+    job.next_run = croniter(job.schedule_str, now).get_next(datetime)
     job.save()
-    logger.debug(f"Notified for job '{id}' at {job.last_notified}")
-    
+    logger.debug(f"Notified for job '{job}' at {job.last_notified}")
+
     return JsonResponse({'success_message': 'Job notified successfully.'})
 
 @login_required
@@ -42,7 +45,8 @@ def view_jobs(request):
     context = {
         'teams': [{'id': 'All', 'job_groups': [], 'empty': True}],
         'protocol': settings.SITE_PROTOCOL,
-        'domain': settings.SITE_DOMAIN
+        'domain': settings.SITE_DOMAIN,
+        'tab': request.COOKIES.get('tab', None),
     }
     for team in chain((None,), request.user.teams.all()):
         ungrouped = (get_job_group(request.user, None, team),)
@@ -63,8 +67,9 @@ def view_jobs(request):
 
 @login_required
 def add_job(request):
+    context = {'tab': request.COOKIES.get('tab', None)}
     if request.method == 'POST':
-        context = {'prefill': request.POST}
+        context['prefill'] = request.POST
         # Logic to add the job
         try:
             now = datetime.now(tz=pytz.timezone(request.POST['timezone']))
@@ -159,9 +164,7 @@ def add_job(request):
             # TODO: replace this with form validation
             context['error_message'] = "invalid data in one or more field(s)"
         
-        return render(request, 'crontrack/addjob.html', context)
-    else:
-        return render(request, 'crontrack/addjob.html')
+    return render(request, 'crontrack/addjob.html', context)
         
 # ---- TODO: convert the context/error_message system to use django messages (?)
 # Also make sure to redirect after successfully dealing with post data to prevent duplicates
@@ -173,29 +176,37 @@ def edit_job(request):
         if 'edited' in request.POST:
             # Edit the job
             context = {'prefill': request.POST}
-            try:
-                with transaction.atomic():
-                    job.name = request.POST['name']
-                    job.schedule_str = request.POST['schedule_str']
-                    job.time_window = request.POST['time_window']
-                    job.description = request.POST['description']
-                    
-                    timezone.activate(request.user.timezone)
-                    now = timezone.localtime(timezone.now())
-                    job.next_run = croniter(job.schedule_str, now).get_next(datetime)
-                    
-                    job.full_clean()
-                    job.save()
-            except CroniterBadCronError:
-                context['error_message'] = "invalid cron schedule string"
-            except ValueError:
-                context['error_message'] = "please enter a valid whole number for the time window"
-            except ValidationError:
-                context['error_message'] = "invalid data entered in one or more fields"
+            if permission_denied(request.user, job.user, job.team):
+                logger.warning("User {user} tried to edit job {job} without permission")
             else:
-                return HttpResponseRedirect(reverse('crontrack:view_jobs'))
+                try:
+                    with transaction.atomic():
+                        job.name = request.POST['name']
+                        job.schedule_str = request.POST['schedule_str']
+                        job.time_window = request.POST['time_window']
+                        job.description = request.POST['description']
+                        
+                        now = timezone.localtime(timezone.now(), request.user.timezone)
+                        job.next_run = croniter(job.schedule_str, now).get_next(datetime)
+                        
+                        job.full_clean()
+                        job.save()
+                except CroniterBadCronError:
+                    context['error_message'] = "invalid cron schedule string"
+                except ValueError:
+                    context['error_message'] = "please enter a valid whole number for the time window"
+                except ValidationError:
+                    context['error_message'] = "invalid data entered in one or more fields"
+                else:
+                    if 'save_reset' in request.POST:
+                        # Reset all status fields (notification and fail timestamps)
+                        job.last_notified = None
+                        job.last_failed = None
+                        job.save()
                 
-            # ^ copied code feels bad. TODO: draw this out into a helper function
+                    return HttpResponseRedirect(reverse('crontrack:view_jobs'))
+                
+            # ^ copied code feels bad. TODO: draw this out into a helper function (or just use a form)
             return render(request, 'crontrack/editjob.html', context)
         else:
             return render(request, 'crontrack/editjob.html', {'job': job})
